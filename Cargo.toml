@@ -1,0 +1,23 @@
+[package]
+name = "rustSDK"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tonic = { version = "0.13.1", features = ["transport"] }  # or latest
+tokio = { version = "1.45.1", features = ["full"] }
+async-trait = "0.1.88"
+anyhow = "1.0.98"
+prost = "0.13.5"
+prost-types = "0.13.5"
+futures = "0.3.31"
+bytes = "1.10.1"
+io = "0.0.2"
+tokio-stream = "0.1.17"
+gstd = "1.8.1"
+async-stream = "0.3.6"
+log = "0.4.27"
+
+[build-dependencies]
+tonic-build = "0.13.1"
+prost-build = "0.13.5"
