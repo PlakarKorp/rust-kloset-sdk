@@ -124,5 +124,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
     importer.close().await?;
 
+    crate::importer::sdk_importer::run_importer(importer)
+        .await
+        .map_err(|e| anyhow::anyhow!("Importer server failed: {}", e))?;
+
     Ok(())
 }

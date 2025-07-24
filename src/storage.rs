@@ -680,14 +680,14 @@ pub mod sdk_storage {
         }
     }
 
-    use tonic::transport::Server;
     use crate::pkg::store::store_server::StoreServer; // Generated gRPC server trait
+    use tonic::transport::Server;
 
     pub async fn run_storage<T>(storage: T) -> Result<(), Box<dyn std::error::Error>>
     where
         T: KlosetStorage + Send + Sync + 'static,
     {
-        // Set up the gRPC server address, localhost with port 50051, it has to be changed to an appropriate address
+        // TODO: Set up the gRPC server address, localhost with port 50051, it has to be changed to an appropriate address
         let addr = "[::1]:50051".parse()?;
 
         let svc = StoreServer::new(StoragePluginServer { storage });
