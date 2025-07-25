@@ -15,15 +15,15 @@ struct DummyImporter;
 
 #[async_trait]
 impl Importer for DummyImporter {
-    fn origin(&self) -> &str {
+    fn origin(&self) -> String {
         "dummy_origin"
     }
 
-    fn r#type(&self) -> &str {
+    fn r#type(&self) -> String {
         "dummy_type"
     }
 
-    fn root(&self) -> &str {
+    fn root(&self) -> String {
         "/dummy/root"
     }
 

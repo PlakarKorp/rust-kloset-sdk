@@ -6,9 +6,9 @@ pub mod kloset_importer {
 
     #[async_trait]
     pub trait Importer: Send + Sync + 'static {
-        fn origin(&self) -> &str;
-        fn r#type(&self) -> &str;
-        fn root(&self) -> &str;
+        fn origin(&self) -> String;
+        fn r#type(&self) -> String;
+        fn root(&self) -> String;
 
         async fn scan(
             &self,
