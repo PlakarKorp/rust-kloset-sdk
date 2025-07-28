@@ -1,5 +1,3 @@
-mod importer;
-
 use importer::kloset_importer::*;
 use chrono::Utc;
 use futures::stream;
