@@ -12,9 +12,9 @@ pub mod kloset_importer {
 
         async fn scan(
             &self,
-        ) -> Result<Pin<Box<dyn Stream<Item = ScanResult> + Send>>, anyhow::Error>;
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = ScanResult> + Send>>>;
 
-        async fn close(&self) -> Result<(), anyhow::Error>;
+        async fn close(&self) -> anyhow::Result<()>;
     }
 
     pub enum ScanResult {
