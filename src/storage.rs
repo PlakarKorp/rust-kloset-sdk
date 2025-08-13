@@ -66,6 +66,19 @@ pub mod kloset_storage {
 
         async fn close(&self) -> anyhow::Result<()>;
     }
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    pub type StoreFn = Arc<
+        dyn Fn(
+            //context: ??
+            String,
+            HashMap<String, String>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Box<dyn crate::storage::kloset_storage::Store>, Box<dyn std::error::Error + Send + Sync>>> + Send>>
+        + Send
+        + Sync,
+    >;
 }
 
 pub mod sdk_storage {
@@ -213,16 +226,41 @@ pub mod sdk_storage {
     
     use crate::pkg::store::*;
     use crate::pkg::store::store_server::Store as GrpcStore;
-    use crate::storage::kloset_storage::{MAC as KlosetMAC, Store as KlosetStorage};
+    use crate::storage::kloset_storage::{MAC as KlosetMAC, Store as KlosetStorage, StoreFn};
     
     use grpc_utils::{send_chunks, StreamingChunkReader};
-    
-    pub struct StoragePluginServer<T: KlosetStorage + Send + Sync + 'static> {
-        pub storage: T,
+
+    struct StoragePluginServer {
+        storage: Arc<Mutex<Option<Box<dyn KlosetStorage>>>>,
+        constructor: StoreFn,
     }
 
     #[tonic::async_trait]
-    impl<T: KlosetStorage + Send + Sync + 'static> GrpcStore for StoragePluginServer<T> {
+    impl GrpcStore for StoragePluginServer {
+
+        async fn init(
+            &self,
+            request: Request<InitRequest>,
+        ) -> Result<Response<InitResponse>, Status> {
+            let req = request.into_inner();
+            let proto = req.proto;
+            let config = req.config;
+
+            let store = (self.constructor)(
+                //context,
+                proto,
+                config
+            )
+                .await
+                .map_err(|e| Status::internal(format!("constructor error: {}", e)))?;
+
+            // Store the result in the mutex
+            let mut storage_lock = self.storage.lock().await;
+            *storage_lock = Some(store);
+
+            Ok(Response::new(InitResponse {}))
+        }
+
         async fn create(
             &self,
             request: Request<CreateRequest>,
@@ -230,6 +268,8 @@ pub mod sdk_storage {
             let req = request.into_inner();
 
             self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .create(req.config)
                 .await
                 .map_err(|e| Status::internal(format!("Storage create failed: {}", e)))?;
@@ -241,8 +281,9 @@ pub mod sdk_storage {
             &self,
             _request: Request<OpenRequest>,
         ) -> Result<Response<OpenResponse>, Status> {
-            let config_bytes = self
-                .storage
+            let config_bytes = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .open()
                 .await
                 .map_err(|e| Status::internal(format!("Storage open failed: {}", e)))?;
@@ -257,6 +298,8 @@ pub mod sdk_storage {
             _request: Request<CloseRequest>,
         ) -> Result<Response<CloseResponse>, Status> {
             self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .close()
                 .await
                 .map_err(|e| Status::internal(format!("Storage close failed: {}", e)))?;
@@ -268,7 +311,9 @@ pub mod sdk_storage {
             &self,
             _request: Request<GetLocationRequest>,
         ) -> Result<Response<GetLocationResponse>, Status> {
-            let location = self.storage.location();
+            let location = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?.location();
 
             Ok(Response::new(GetLocationResponse {
                 location,
@@ -279,7 +324,9 @@ pub mod sdk_storage {
             &self,
             _request: Request<GetModeRequest>,
         ) -> Result<Response<GetModeResponse>, Status> {
-            let mode = self.storage.mode();
+            let mode = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?.mode();
 
             Ok(Response::new(GetModeResponse {
                 mode: mode as i32,
@@ -290,7 +337,9 @@ pub mod sdk_storage {
             &self,
             _request: Request<GetSizeRequest>,
         ) -> Result<Response<GetSizeResponse>, Status> {
-            let size = self.storage.size();
+            let size = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?.size();
 
             Ok(Response::new(GetSizeResponse {
                 size,
@@ -302,7 +351,9 @@ pub mod sdk_storage {
             _request: Request<GetStatesRequest>,
         ) -> Result<Response<GetStatesResponse>, Status> {
             // Execute the backend method to get the states
-            let states = self.storage.get_states()
+            let states = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?.get_states()
                 .await.map_err(|e| Status::internal(format!("failed to get states: {}", e)))?;
 
             // Map each state byte array into a MAC message
@@ -339,8 +390,9 @@ pub mod sdk_storage {
 
             // Execute the backend method to put the state
             let reader = Box::pin(StreamingChunkReader::new(Arc::new(Mutex::new(stream))));
-            let size = self
-                .storage
+            let size = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .put_packfile(mac, reader)
                 .await
                 .map_err(|e| Status::internal(format!("put_state failed: {}", e)))?;
@@ -365,8 +417,9 @@ pub mod sdk_storage {
             };
 
             // Execute the backend method to get the state reader
-            let reader = self
-                .storage
+            let reader = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .get_state(mac)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -410,6 +463,8 @@ pub mod sdk_storage {
 
             // Execute the backend method to delete the state
             self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .delete_state(mac)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -421,7 +476,9 @@ pub mod sdk_storage {
             &self,
             _request: Request<GetPackfilesRequest>,
         ) -> Result<Response<GetPackfilesResponse>, Status> {
-            let states = self.storage.get_packfiles()
+            let states = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?.get_packfiles()
                 .await.map_err(|e| Status::internal(format!("failed to get packfiles: {}", e)))?;
 
             let macs = states.into_iter()
@@ -457,8 +514,9 @@ pub mod sdk_storage {
             let stream = Arc::new(Mutex::new(stream));
             let reader = Box::pin(StreamingChunkReader::new(stream));
 
-            let size = self
-                .storage
+            let size = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .put_packfile(mac, reader)
                 .await
                 .map_err(|e| Status::internal(format!("put_packfile failed: {}", e)))?;
@@ -481,8 +539,9 @@ pub mod sdk_storage {
                 KlosetMAC(arr)
             };
 
-            let reader = self
-                .storage
+            let reader = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .get_packfile(mac)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -523,8 +582,9 @@ pub mod sdk_storage {
             let offset = req.offset;
             let length = req.length;
 
-            let reader = self
-                .storage
+            let reader = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .get_packfile_blob(mac, offset, length)
                 .await
                 .map_err(|e| Status::internal(format!("failed to get packfile blob: {}", e)))?;
@@ -563,6 +623,8 @@ pub mod sdk_storage {
             };
 
             self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .delete_packfile(mac)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -574,7 +636,9 @@ pub mod sdk_storage {
             &self,
             _request: Request<GetLocksRequest>,
         ) -> Result<Response<GetLocksResponse>, Status> {
-            let locks = self.storage.get_locks()
+            let locks = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?.get_locks()
                 .await
                 .map_err(|e| Status::internal(format!("failed to get locks: {}", e)))?;
 
@@ -609,8 +673,9 @@ pub mod sdk_storage {
             let stream = Arc::new(Mutex::new(stream));
             let reader = Box::pin(StreamingChunkReader::new(stream));
 
-            let size = self
-                .storage
+            let size = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .put_packfile(mac, reader)
                 .await
                 .map_err(|e| Status::internal(format!("put_lock failed: {}", e)))?;
@@ -634,6 +699,8 @@ pub mod sdk_storage {
             };
 
             let reader = self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .get_lock(mac)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -672,6 +739,8 @@ pub mod sdk_storage {
             };
 
             self.storage
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Storage not initialized") })?
                 .delete_lock(mac)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -682,22 +751,24 @@ pub mod sdk_storage {
 
     use crate::pkg::store::store_server::StoreServer; // Generated gRPC server trait
     use tonic::transport::Server;
+    use crate::conn::SingleConnStream;
 
-    pub async fn run_storage<T>(storage: T) -> Result<(), Box<dyn std::error::Error>>
-    where
-        T: KlosetStorage + Send + Sync + 'static,
-    {
-        // TODO: Set up the gRPC server address, localhost with port 50051, it has to be changed to an appropriate address
-        let addr = "[::1]:50051".parse()?;
-
-        let svc = StoreServer::new(StoragePluginServer { storage });
-
-        // Start the tonic gRPC server
-        Server::builder()
-            .add_service(svc)
-            .serve(addr)
-            .await?;
-
-        Ok(())
+    pub async fn run_storage(constructor: StoreFn) -> Result<(), Box<dyn std::error::Error>> {
+        todo!()
+        
+        // let incoming = SingleConnStream::from_fd(0)?;
+        // 
+        // let svc = StoreServer::new(StoragePluginServer {
+        //     constructor,
+        //     storage: Arc::new(Mutex::new(None)),
+        // });
+        // 
+        // Server::builder()
+        //     .add_service(svc)
+        //     .serve_with_incoming(incoming)
+        //     .await?;
+        // 
+        // Ok(())
     }
+
 }

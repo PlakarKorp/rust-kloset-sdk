@@ -5,6 +5,18 @@ pub struct Mac {
     pub value: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InitRequest {
+    #[prost(string, tag = "1")]
+    pub proto: ::prost::alloc::string::String,
+    #[prost(map = "string, string", tag = "2")]
+    pub config: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct InitResponse {}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateRequest {
     #[prost(bytes = "vec", tag = "1")]
     pub config: ::prost::alloc::vec::Vec<u8>,
@@ -255,6 +267,24 @@ pub mod store_client {
         pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
+        }
+        pub async fn init(
+            &mut self,
+            request: impl tonic::IntoRequest<super::InitRequest>,
+        ) -> std::result::Result<tonic::Response<super::InitResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/store.Store/Init");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("store.Store", "Init"));
+            self.inner.unary(req, path, codec).await
         }
         pub async fn create(
             &mut self,
@@ -669,6 +699,10 @@ pub mod store_server {
     /// Generated trait containing gRPC methods that should be implemented for use with StoreServer.
     #[async_trait]
     pub trait Store: std::marker::Send + std::marker::Sync + 'static {
+        async fn init(
+            &self,
+            request: tonic::Request<super::InitRequest>,
+        ) -> std::result::Result<tonic::Response<super::InitResponse>, tonic::Status>;
         async fn create(
             &self,
             request: tonic::Request<super::CreateRequest>,
@@ -879,6 +913,49 @@ pub mod store_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
+                "/store.Store/Init" => {
+                    #[allow(non_camel_case_types)]
+                    struct InitSvc<T: Store>(pub Arc<T>);
+                    impl<T: Store> tonic::server::UnaryService<super::InitRequest>
+                    for InitSvc<T> {
+                        type Response = super::InitResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::InitRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Store>::init(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = InitSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/store.Store/Create" => {
                     #[allow(non_camel_case_types)]
                     struct CreateSvc<T: Store>(pub Arc<T>);

@@ -1306,7 +1306,9 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "futures-core",
  "gstd",
+ "hyper",
  "io",
  "log",
  "prost",
@@ -1314,6 +1316,7 @@ dependencies = [
  "prost-types",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-build",
 ]

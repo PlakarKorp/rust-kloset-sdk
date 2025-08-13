@@ -22,6 +22,32 @@ pub mod kloset_exporter {
 
         async fn close(&self) -> anyhow::Result<()>;
     }
+
+    use std::io::Write;
+
+    pub struct Options {
+        pub max_concurrency: u64,
+
+        pub stdout: Box<dyn Write + Send>,
+        pub stderr: Box<dyn Write + Send>,
+    }
+
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    pub type ExporterFn = Arc<
+        dyn Fn(
+            //ctx,
+            Arc<Options>,
+            String,
+            HashMap<String, String>,
+        ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Exporter + Send + Sync>, tonic::Status>> + Send>>
+        + Send
+        + Sync,
+    >;
+
 }
 
 pub mod sdk_exporter {
@@ -32,21 +58,64 @@ pub mod sdk_exporter {
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use tonic::{Request, Response, Status, Streaming};
+    use tokio::sync::Mutex;
 
-    use crate::exporter::kloset_exporter::Exporter as KlosetExporter;
+    use crate::exporter::kloset_exporter::{
+        Exporter as KlosetExporter,
+        Options as KlosetExporterOptions,
+        ExporterFn,
+    };
     use crate::importer::kloset_importer::FileInfo;
     use crate::pkg::exporter::*;
     use crate::pkg::exporter::exporter_server::{Exporter as GrpcExporter};
 
 
-    pub struct ExporterPluginServer<T: KlosetExporter + Send + Sync + 'static> {
-        pub exporter: T,
+
+    pub struct ExporterPluginServer {
+        constructor: ExporterFn,
+        exporter: Arc<Mutex<Option<Box<dyn KlosetExporter + Send + Sync>>>>,
     }
 
+
     #[tonic::async_trait]
-    impl<T: KlosetExporter + Send + Sync + 'static> GrpcExporter for ExporterPluginServer<T> {
+    impl GrpcExporter for ExporterPluginServer {
+
+        async fn init(
+            &self,
+            request: tonic::Request<InitRequest>,
+        ) -> Result<tonic::Response<InitResponse>, tonic::Status> {
+            let req = request.into_inner();
+
+            let opt = req.options
+                .ok_or_else(|| Status::invalid_argument("options missing"))?;
+
+            // Build exporter options
+            let options = Arc::new(KlosetExporterOptions {
+                max_concurrency: 4, // or get from env/args
+
+                stdout: Box::new(std::io::stdout()),
+                stderr: Box::new(std::io::stderr()),
+            });
+
+            let exporter = (self.constructor)(
+                //ctx,
+                options,
+                req.proto,
+                req.config,
+            )
+                .await?;
+
+            let mut lock = self.exporter.lock().await;
+            *lock = Some(exporter);
+
+            Ok(tonic::Response::new(InitResponse {}))
+        }
+
         async fn root(&self, _request: Request<RootRequest>) -> Result<Response<RootResponse>, Status> {
-            let root = self.exporter.root();
+            let root = self.exporter
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
+                .root();
             Ok(Response::new(RootResponse {
                 root_path: root,
             }))
@@ -59,6 +128,8 @@ pub mod sdk_exporter {
             let pathname = request.into_inner().pathname;
 
             self.exporter
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
                 .create_directory(pathname)
                 .await.map_err(|e| Status::internal(format!("failed to create directory: {}", e)))?;
 
@@ -96,6 +167,8 @@ pub mod sdk_exporter {
             let reader = Cursor::new(buffer);
 
             self.exporter
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
                 .store_file(pathname, Box::new(reader), size)
                 .await.map_err(|e| Status::internal(format!("store_file failed: {}", e)))?;
 
@@ -138,6 +211,8 @@ pub mod sdk_exporter {
             };
 
             self.exporter
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
                 .set_permissions(req.pathname, file_info)
                 .await.map_err(|e| Status::internal(format!("set_permissions failed: {}", e)))?;
 
@@ -149,6 +224,8 @@ pub mod sdk_exporter {
             _request: Request<CloseRequest>,
         ) -> Result<Response<CloseResponse>, Status> {
             self.exporter
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
                 .close()
                 .await.map_err(|e| Status::internal(format!("close failed: {}", e)))?;
 
@@ -157,24 +234,26 @@ pub mod sdk_exporter {
     }
 
     use crate::pkg::exporter::exporter_server::ExporterServer;
-    use tonic::transport::Server;
 
-    pub async fn run_exporter<T>(exporter: T) -> Result<(), Box<dyn std::error::Error>>
-    where
-        T: crate::exporter::kloset_exporter::Exporter + Send + Sync + 'static,
-    {
-        // TODO: Set up the gRPC server address, localhost with port 50051, it has to be changed to an appropriate address
-        let addr = "[::1]:50051".parse()?;
-
-        let svc = ExporterServer::new(ExporterPluginServer { exporter });
-
-        // Start the tonic gRPC server
-        Server::builder()
-            .add_service(svc)
-            .serve(addr)
-            .await?;
-
-        Ok(())
+    pub async fn run_exporter(constructor: ExporterFn) -> Result<(), Box<dyn std::error::Error>> {
+        todo!();
+        
+        // let incoming = ??;
+        // 
+        // let exporter = ExporterPluginServer {
+        //     constructor,
+        //     exporter: Arc::new(Mutex::new(None)),
+        // };
+        // 
+        // let svc = ExporterServer::new(exporter);
+        // 
+        // tonic::transport::Server::builder()
+        //     .add_service(svc)
+        //     .serve_with_incoming(incoming)
+        //     .await?;
+        // 
+        // Ok(())
     }
+
 }
 

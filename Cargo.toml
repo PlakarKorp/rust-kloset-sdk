@@ -18,6 +18,9 @@ gstd = "1.8.1"
 async-stream = "0.3.6"
 log = "0.4.27"
 chrono = "0.4.41"
+futures-core = "0.3.31"
+tokio-util = "0.7.15"
+hyper = "1.6.0"
 
 [build-dependencies]
 tonic-build = "0.13.1"

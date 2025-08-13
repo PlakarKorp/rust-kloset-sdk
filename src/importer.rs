@@ -63,6 +63,38 @@ pub mod kloset_importer {
         pub name: String,
         pub r#type: ExtendedAttributeType,
     }
+
+    use std::io::{Read, Write};
+
+    pub struct Options {
+        pub hostname: String,
+        pub operating_system: String,
+        pub architecture: String,
+        pub cwd: String,
+        pub max_concurrency: i64,
+
+        pub stdin: Box<dyn Read + Send>,
+        pub stdout: Box<dyn Write + Send>,
+        pub stderr: Box<dyn Write + Send>,
+    }
+
+    unsafe impl Send for Options {}
+    unsafe impl Sync for Options {}
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::future::Future;
+
+    pub type ImporterFn = Arc<
+        dyn Fn(
+            //ctx ??
+            Arc<Options>,
+            String,
+            HashMap<String, String>,
+        ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Importer + Send + Sync>, tonic::Status>> + Send>>
+        + Send
+        + Sync,
+    >;
 }
 
 pub mod sdk_importer {
@@ -75,6 +107,8 @@ pub mod sdk_importer {
         ScanError as KlosetScanError,
         ScanRecord as KlosetScanRecord,
         ScanResult as KlosetScanResult,
+        Options as KlosetImporterOptions,
+        ImporterFn,
     };
     use crate::pkg::importer::*;
     use crate::pkg::importer::importer_server::{Importer as GRPCImporter};
@@ -89,20 +123,69 @@ pub mod sdk_importer {
     use tokio_stream::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::{Request, Response, Status};
+    use tokio::sync::Mutex;
 
-
-    pub struct ImporterPluginServer<I: KlosetImporter> {
-        importer: I,
+    struct ImporterPluginServer {
+        constructor: ImporterFn,
+        importer: Arc<Mutex<Option<Box<dyn KlosetImporter + Send + Sync>>>>,
         holding_readers: Arc<tokio::sync::Mutex<HashMap<String, Box<dyn AsyncRead + Send + Unpin>>>>,
     }
 
     #[tonic::async_trait]
-    impl<T: KlosetImporter + Send + Sync + 'static> GRPCImporter for ImporterPluginServer<T> {
+    impl GRPCImporter for ImporterPluginServer {
+        async fn init(
+            &self,
+            request: Request<InitRequest>,
+        ) -> Result<Response<InitResponse>, Status> {
+            let req = request.into_inner();
+
+            let opt = req.options.clone().ok_or_else(|| {
+                Status::invalid_argument("Options must be provided for initialization")
+            })?;
+
+            // Build Options struct
+            let options = Arc::new(KlosetImporterOptions {
+                hostname: opt.hostname,
+                operating_system: opt.os,
+                architecture: opt.arch,
+                cwd: opt.cwd,
+                max_concurrency: opt.maxconcurrency,
+
+                stdin: Box::new(std::io::stdin()),
+                stdout: Box::new(std::io::stdout()),
+                stderr: Box::new(std::io::stderr()),
+            });
+
+            // Call the constructor
+            let importer = (self.constructor)(
+                //ctx ??
+                options,
+                req.proto,
+                req.config,
+            )
+                .await?;
+
+            // Save it
+            let mut lock = self.importer.lock().await;
+            *lock = Some(importer);
+
+            Ok(Response::new(InitResponse { error: None }))
+        }
+
         async fn info(&self, _request: Request<InfoRequest>) -> Result<Response<InfoResponse>, Status> {
             let resp = InfoResponse {
-                origin: self.importer.origin().to_string(),
-                r#type: self.importer.r#type().to_string(),
-                root: self.importer.root().to_string(),
+                origin: self.importer
+                    .lock().await
+                    .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
+                    .origin().to_string(),
+                r#type: self.importer
+                    .lock().await
+                    .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
+                    .r#type().to_string(),
+                root: self.importer
+                    .lock().await
+                    .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
+                    .root().to_string(),
             };
 
             Ok(Response::new(resp))
@@ -111,7 +194,10 @@ pub mod sdk_importer {
         type ScanStream = Pin<Box<dyn Stream<Item = Result<ScanResponse, Status>> + Send>>;
 
         async fn scan(&self, _request: Request<ScanRequest>) -> Result<Response<Self::ScanStream>, Status> {
-            let mut rx_results = self.importer.scan().await.map_err(|e| {
+            let mut rx_results = self.importer
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
+                .scan().await.map_err(|e| {
                 Status::internal(format!("Importer scan failed: {e}"))
             })?;
 
@@ -212,18 +298,18 @@ pub mod sdk_importer {
 
             // Create a stream that reads chunks from the reader
             let stream = async_stream::try_stream! {
-        let mut buf = [0u8; 16 * 1024]; // 16 KB buffer
-        loop {
-            let n = reader.read(&mut buf).await.map_err(|e| Status::internal(format!("read error: {e}")))?;
-            if n == 0 {
-                break;
-            }
+                let mut buf = [0u8; 16 * 1024]; // 16 KB buffer
+                loop {
+                    let n = reader.read(&mut buf).await.map_err(|e| Status::internal(format!("read error: {e}")))?;
+                    if n == 0 {
+                        break;
+                    }
 
-            yield OpenReaderResponse {
-                chunk: bytes::Bytes::copy_from_slice(&buf[..n]).into(),
+                    yield OpenReaderResponse {
+                        chunk: bytes::Bytes::copy_from_slice(&buf[..n]).into(),
+                    };
+                }
             };
-        }
-    };
 
             Ok(Response::new(Box::pin(stream) as Self::OpenReaderStream))
         }
@@ -237,7 +323,10 @@ pub mod sdk_importer {
         }
 
         async fn close(&self, request: Request<CloseRequest>) -> Result<Response<CloseResponse>, Status> {
-            self.importer.close().await.map_err(|e| {
+            self.importer
+                .lock().await
+                .as_ref().ok_or_else(|| { Status::failed_precondition("Importer not initialized") })?
+                .close().await.map_err(|e| {
                 Status::internal(format!("Importer close failed: {e}"))
             })?;
 
@@ -248,21 +337,24 @@ pub mod sdk_importer {
     use crate::pkg::importer::importer_server::ImporterServer;
     use tonic::transport::Server;
 
-    pub async fn run_importer<T>(importer: T) -> Result<(), Box<dyn std::error::Error>>
-    where
-        T: crate::importer::kloset_importer::Importer + Send + Sync + 'static,
-    {
-        // TODO: Set up the gRPC server address, localhost with port 50051, it has to be changed to an appropriate address
-        let addr = "[::1]:50051".parse()?;
-
-        let svc = ImporterServer::new(ImporterPluginServer { importer, holding_readers: Arc::new(tokio::sync::Mutex::new(HashMap::new())) });
-
-        // Start the tonic gRPC server
-        Server::builder()
-            .add_service(svc)
-            .serve(addr)
-            .await?;
-
-        Ok(())
+    pub async fn run_importer(constructor: ImporterFn) -> Result<(), Box<dyn std::error::Error>> {
+        todo!()
+        
+        // let incoming = ??;
+        // 
+        // let importer = ImporterPluginServer {
+        //     constructor,
+        //     importer: Arc::new(Mutex::new(None)),
+        //     holding_readers: Arc::new(Default::default()),
+        // };
+        // 
+        // let svc = ImporterServer::new(importer);
+        // 
+        // let result = Server::builder()
+        //     .add_service(svc)
+        //     .serve_with_incoming(incoming)
+        //     .await?;
+        // 
+        // Ok(())
     }
 }
