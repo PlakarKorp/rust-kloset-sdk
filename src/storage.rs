@@ -751,23 +751,22 @@ pub mod sdk_storage {
 
     use crate::pkg::store::store_server::StoreServer; // Generated gRPC server trait
     use tonic::transport::Server;
-    use crate::conn::SingleConnStream;
 
     pub async fn run_storage(constructor: StoreFn) -> Result<(), Box<dyn std::error::Error>> {
         todo!()
-        
+
         // let incoming = SingleConnStream::from_fd(0)?;
-        // 
+        //
         // let svc = StoreServer::new(StoragePluginServer {
         //     constructor,
         //     storage: Arc::new(Mutex::new(None)),
         // });
-        // 
+        //
         // Server::builder()
         //     .add_service(svc)
         //     .serve_with_incoming(incoming)
         //     .await?;
-        // 
+        //
         // Ok(())
     }
 
